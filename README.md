@@ -2,8 +2,6 @@
 
 This repository contains prawn keypoint datasets collected in **two different seasons (2024 and 2025)**, as well as an Excel file summarizing all annotated keypoints.
 
-The purpose of this README is to describe **what exists in the image folders** and **what information appears inside the Excel file**.
-
 ---
 
 ## 📂 Image Directories
