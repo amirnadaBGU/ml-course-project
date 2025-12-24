@@ -1,3 +1,4 @@
+# language: python
 #!/usr/bin/env python3
 from __future__ import annotations
 
@@ -6,23 +7,18 @@ import numpy as np
 import pandas as pd
 
 # ============================================================
-# CONFIG (no terminal needed)
+# CONFIG
 # ============================================================
 SCRIPT_DIR = Path(__file__).resolve().parent
 MODELS_DIR = SCRIPT_DIR / "models_csv"
 
-# Default input (the CSV produced by Baseline_Eyes_From3Kpts.py)
-IN_CSV = MODELS_DIR / "baseline_linreg_eyes_from3kpts_test.csv"
-
-# Output files
-OUT_SUMMARY_XLSX = MODELS_DIR / "evaluation_baseline_summary.xlsx"
-OUT_SUMMARY_CSV  = MODELS_DIR / "evaluation_summary.csv"
+# Fallback if no models found in subfolder (optional)
+IN_CSV_FALLBACK = MODELS_DIR / "baseline_linreg_eyes_from3kpts_test.csv"
 
 # Evaluate only if GT eyes visibility >= this
 MIN_EYES_VIS_FOR_EVAL = 1
 
 # Accuracy thresholds in normalized distance units
-# (tune these if you want tighter/looser)
 EPS_LIST = [0.005, 0.01, 0.02, 0.05]
 
 # ============================================================
@@ -42,12 +38,11 @@ def safe_quantile(x: pd.Series, q: float) -> float:
     vals = vals[np.isfinite(vals)]
     return float(np.quantile(vals, q)) if len(vals) else float("nan")
 
-def compute_metrics(df_eval: pd.DataFrame, label: str) -> list[dict]:
+def compute_metrics(df_eval: pd.DataFrame, label: str) -> tuple[list[dict], pd.DataFrame]:
     """
     Compute standard regression metrics for eyes prediction.
     Expects columns: e_x, e_y, e_pred_x, e_pred_y
     """
-    # numeric conversion
     for col in ["e_x", "e_y", "e_pred_x", "e_pred_y"]:
         df_eval[col] = pd.to_numeric(df_eval[col], errors="coerce")
 
@@ -55,7 +50,6 @@ def compute_metrics(df_eval: pd.DataFrame, label: str) -> list[dict]:
     dy = df_eval["e_y"] - df_eval["e_pred_y"]
     dist = np.sqrt((dx ** 2) + (dy ** 2))
 
-    # store dist for later reporting
     df_eval = df_eval.copy()
     df_eval["dist_eval"] = dist
 
@@ -65,7 +59,6 @@ def compute_metrics(df_eval: pd.DataFrame, label: str) -> list[dict]:
     dist_avg = float(np.nanmean(dist))
 
     out = []
-
     out.append({
         "group": label,
         "n": int(df_eval.shape[0]),
@@ -79,7 +72,6 @@ def compute_metrics(df_eval: pd.DataFrame, label: str) -> list[dict]:
         "Dist_p99": safe_quantile(pd.Series(dist), 0.99),
     })
 
-    # Accuracy@eps
     for eps in EPS_LIST:
         acc = float(np.nanmean((dist <= eps).astype(float)))
         out.append({
@@ -92,29 +84,24 @@ def compute_metrics(df_eval: pd.DataFrame, label: str) -> list[dict]:
     return out, df_eval
 
 
-def main() -> None:
-    if not IN_CSV.exists():
-        raise FileNotFoundError(
-            f"Input CSV not found:\n{IN_CSV}\n"
-            "Make sure you ran the model script and it saved the CSV to models_csv/."
-        )
+def evaluate_csv(csv_path: Path) -> None:
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Input CSV not found: {csv_path}")
 
-    df = pd.read_csv(IN_CSV)
+    print(f"Evaluating: {csv_path.name}")
+    df = pd.read_csv(csv_path)
 
     required = {"e_x", "e_y", "e_pred_x", "e_pred_y", "e_v"}
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"Missing required columns in CSV: {sorted(missing)}")
+        raise ValueError(f"Missing required columns in CSV {csv_path}: {sorted(missing)}")
 
-    # filter to rows with GT eyes visible enough
     df["e_v"] = pd.to_numeric(df["e_v"], errors="coerce")
     df_eval = df[df["e_v"] >= MIN_EYES_VIS_FOR_EVAL].copy()
 
     if df_eval.empty:
-        raise RuntimeError(
-            f"No rows with e_v >= {MIN_EYES_VIS_FOR_EVAL}. "
-            "Cannot evaluate without ground-truth eyes."
-        )
+        print(f"  [Warn] No rows with e_v >= {MIN_EYES_VIS_FOR_EVAL} in {csv_path.name}. Skipping.")
+        return
 
     all_rows = []
 
@@ -140,7 +127,7 @@ def main() -> None:
             m, _ = compute_metrics(sub, label=f"class={int(c)}")
             all_rows.extend(m)
 
-    # By image (label_file) worst 10 (useful debug)
+    # By image (label_file) worst 10
     if "label_file" in df_eval.columns:
         df_tmp = df_eval_with_dist.copy()
         df_tmp["label_file"] = df_tmp["label_file"].astype(str)
@@ -159,26 +146,50 @@ def main() -> None:
 
     out_df = pd.DataFrame(all_rows)
 
-    # Save
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    out_df.to_csv(OUT_SUMMARY_CSV, index=False)
-    out_df.to_excel(OUT_SUMMARY_XLSX, index=False)
+    # Save outputs next to the input CSV (in the specific model folder)
+    out_csv = csv_path.parent / f"evaluation_summary_{csv_path.stem}.csv"
+    out_xlsx = csv_path.parent / f"evaluation_summary_{csv_path.stem}.xlsx"
 
-    # Print a short human-friendly summary
-    print("=== Evaluation Summary ===")
-    print(f"Input CSV: {IN_CSV}")
-    print(f"Rows evaluated (e_v>={MIN_EYES_VIS_FOR_EVAL}): {len(df_eval)}")
+    out_df.to_csv(out_csv, index=False)
+    out_df.to_excel(out_xlsx, index=False)
+
+    print("  === Evaluation Summary ===")
+    print(f"  Rows evaluated: {len(df_eval)}")
     overall = out_df[(out_df["group"] == "overall") & (out_df.get("MAE_x").notna())]
     if len(overall):
         row = overall.iloc[0]
-        print(f"MAE_x    : {row['MAE_x']:.6f}")
-        print(f"MAE_y    : {row['MAE_y']:.6f}")
-        print(f"RMSE     : {row['RMSE']:.6f}")
-        print(f"Dist_avg : {row['Dist_avg']:.6f}")
-        print(f"Dist_p95 : {row['Dist_p95']:.6f}")
+        print(f"  MAE_x    : {row['MAE_x']:.6f}")
+        print(f"  MAE_y    : {row['MAE_y']:.6f}")
+        print(f"  Dist_avg : {row['Dist_avg']:.6f}")
 
-    print(f"\nSaved summary CSV : {OUT_SUMMARY_CSV}")
-    print(f"Saved summary XLSX: {OUT_SUMMARY_XLSX}")
+    print(f"  Saved summary to: {out_csv}")
+
+
+def main() -> None:
+    # Look for model CSVs under MODELS_DIR / "models"
+    models_root = MODELS_DIR / "models"
+    csv_list = []
+    if models_root.exists():
+        csv_list = sorted(models_root.rglob("*.csv"))
+
+    # If none found, fall back to IN_CSV_FALLBACK
+    if not csv_list:
+        if IN_CSV_FALLBACK.exists():
+            csv_list = [IN_CSV_FALLBACK]
+        else:
+            print(f"No model CSVs found in {models_root} and fallback {IN_CSV_FALLBACK} missing.")
+            return
+
+    for csv_path in csv_list:
+        # Skip training features and existing summary files
+        # This ensures we only evaluate prediction outputs (like knn_eyes_predictions.csv)
+        if csv_path.name.startswith("features_") or csv_path.name.startswith("evaluation_summary_"):
+            continue
+
+        try:
+            evaluate_csv(csv_path)
+        except Exception as e:
+            print(f"Failed to evaluate {csv_path}: {e}")
 
 
 if __name__ == "__main__":

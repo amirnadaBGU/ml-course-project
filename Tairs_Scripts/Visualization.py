@@ -1,3 +1,4 @@
+# language: python
 #!/usr/bin/env python3
 from __future__ import annotations
 
@@ -7,27 +8,19 @@ import pandas as pd
 import cv2
 
 # ============================================================
-# CONFIG (no terminal needed)
-# File location: ml-course-project/Tairs_Scripts/Visualization.py
+# CONFIG
 # ============================================================
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 
 TEST_ROOT = PROJECT_ROOT / "prawn_2025_circ_small_v1"
-
-# READ + SAVE HERE (same folder you requested)
 MODELS_DIR = SCRIPT_DIR / "models_csv"
-IN_CSV = MODELS_DIR / "baseline_linreg_eyes_from3kpts_test.csv"
-OUT_DIR = MODELS_DIR / "Tairs_Scripts/models_csv/models/BaseLine" / "viz_baseline"
+
+# Fallback if no models found in subfolder
+IN_CSV_FALLBACK = MODELS_DIR / "baseline_linreg_eyes_from3kpts_test.csv"
 
 SEED = 42
-PICK_TWO_RANDOM_IMAGES = True
 MAX_INSTANCES_PER_IMAGE = 20
-
-# Manual override (set PICK_TWO_RANDOM_IMAGES=False):
-LABEL1 = None
-LABEL2 = None
-
 IMG_EXTS = [".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"]
 
 
@@ -35,7 +28,13 @@ def label_to_image_path(test_root: Path, label_path: Path) -> Path:
     labels_dir = test_root / "labels"
     images_dir = test_root / "images"
 
-    rel = label_path.relative_to(labels_dir)
+    # Try to make relative to labels dir if it's a full path
+    try:
+        rel = label_path.relative_to(labels_dir)
+    except ValueError:
+        # If not relative to labels_dir, assume it's already a relative path or filename
+        rel = label_path
+
     stem_rel = rel.with_suffix("")
 
     for ext in IMG_EXTS:
@@ -57,70 +56,150 @@ def draw_point(img, x_px: int, y_px: int, color, text: str) -> None:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 
 
-def main() -> None:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+def visualize_model(csv_path: Path) -> None:
+    if not csv_path.exists():
+        return
 
-    if not IN_CSV.exists():
-        raise FileNotFoundError(f"Missing CSV:\n{IN_CSV}\nRun Baseline.py first.")
+    print(f"Processing model: {csv_path.name}")
 
-    df = pd.read_csv(IN_CSV)
-    needed = {"label_file", "e_x", "e_y", "e_pred_x", "e_pred_y", "dist"}
-    missing = needed - set(df.columns)
-    if missing:
-        raise ValueError(f"CSV is missing columns: {sorted(missing)}")
+    # 1. Setup Output Directory
+    # Create folder of visualization for that specific model
+    out_dir = csv_path.parent / f"viz_{csv_path.stem}"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    unique_labels = df["label_file"].dropna().unique().tolist()
-    if len(unique_labels) < 2:
-        raise ValueError("CSV must include at least 2 different label files.")
+    # 2. Read Data
+    df = pd.read_csv(csv_path)
 
-    if PICK_TWO_RANDOM_IMAGES:
-        rng = np.random.default_rng(SEED)
-        chosen_labels = rng.choice(unique_labels, size=2, replace=False).tolist()
-    else:
-        if LABEL1 is None or LABEL2 is None:
-            raise ValueError("Set LABEL1 and LABEL2 or set PICK_TWO_RANDOM_IMAGES=True.")
-        chosen_labels = [LABEL1, LABEL2]
+    # Ensure numeric columns
+    cols = ["e_x", "e_y", "e_pred_x", "e_pred_y"]
+    missing_cols = [c for c in cols if c not in df.columns]
+    if missing_cols:
+        print(f"  [Skip] Missing columns {missing_cols} in {csv_path.name}")
+        return
 
+    for c in cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # Calculate dist if missing (Evaluation.py computes it but doesn't save to input CSV)
+    if "dist" not in df.columns:
+        dx = df["e_x"] - df["e_pred_x"]
+        dy = df["e_y"] - df["e_pred_y"]
+        df["dist"] = np.sqrt(dx**2 + dy**2)
+
+    # 3. Determine which images to visualize
+    # "using the evaluation summary in that model folder"
+    summary_csv = csv_path.parent / f"evaluation_summary_{csv_path.stem}.csv"
+    chosen_labels = []
+
+    if summary_csv.exists():
+        try:
+            summ_df = pd.read_csv(summary_csv)
+            # Look for worst images identified in evaluation
+            worst = summ_df[summ_df["group"] == "worst_images_meanDist"]
+            if not worst.empty:
+                # Take top 5 worst
+                chosen_labels = worst["label_file"].astype(str).tolist()[:5]
+                print(f"  Using {len(chosen_labels)} worst images from summary.")
+        except Exception as e:
+            print(f"  Could not read summary {summary_csv.name}: {e}")
+
+    # Fallback to random if no summary or no worst images found
+    if not chosen_labels:
+        if "label_file" not in df.columns:
+            print("  [Skip] No label_file column.")
+            return
+
+        unique_labels = df["label_file"].dropna().unique().tolist()
+        if len(unique_labels) > 0:
+            rng = np.random.default_rng(SEED)
+            # Pick up to 2 random images
+            count = min(len(unique_labels), 2)
+            chosen_labels = rng.choice(unique_labels, size=count, replace=False).tolist()
+            print(f"  Using {len(chosen_labels)} random images (no summary found).")
+        else:
+            print("  No labels found in CSV.")
+            return
+
+    # 4. Generate Visualizations
     for idx, lf_str in enumerate(chosen_labels, start=1):
         lf = Path(lf_str)
 
-        img_path = label_to_image_path(TEST_ROOT, lf)
+        try:
+            img_path = label_to_image_path(TEST_ROOT, lf)
+        except FileNotFoundError as e:
+            print(f"  [Warn] {e}")
+            continue
+
         img = cv2.imread(str(img_path))
         if img is None:
-            raise FileNotFoundError(f"Could not read image: {img_path}")
+            print(f"  [Warn] Could not read image: {img_path}")
+            continue
 
         h, w = img.shape[:2]
 
+        # Get predictions for this image
         sub = df[df["label_file"] == lf_str].copy()
+        # Sort by dist descending (worst predictions first)
         sub = sub.sort_values("dist", ascending=False).head(MAX_INSTANCES_PER_IMAGE)
 
         for _, r in sub.iterrows():
+            if pd.isna(r["e_x"]) or pd.isna(r["e_pred_x"]):
+                continue
+
             gt_x = int(round(float(r["e_x"]) * w))
             gt_y = int(round(float(r["e_y"]) * h))
             pr_x = int(round(float(r["e_pred_x"]) * w))
             pr_y = int(round(float(r["e_pred_y"]) * h))
 
             cv2.line(img, (gt_x, gt_y), (pr_x, pr_y), (255, 255, 255), 2, cv2.LINE_AA)
-            draw_point(img, gt_x, gt_y, (0, 255, 0), "Eyes GT")
-            draw_point(img, pr_x, pr_y, (0, 0, 255), "Eyes Pred")
+            draw_point(img, gt_x, gt_y, (0, 255, 0), "GT")
+            draw_point(img, pr_x, pr_y, (0, 0, 255), "Pred")
 
-        mean_dist = float(sub["dist"].mean()) if len(sub) else float("nan")
+        mean_dist = float(sub["dist"].mean()) if len(sub) else 0.0
+
+        # Title on image
+        info_txt = f"{csv_path.stem[:15]}.. | {img_path.name} | n={len(sub)} | meanDist={mean_dist:.4f}"
         cv2.putText(
             img,
-            f"Baseline mean-eyes | {img_path.name} | drawn={len(sub)} | meanDist={mean_dist:.4f}",
+            info_txt,
             (20, 35),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.75,
+            0.6,
             (255, 255, 255),
             2,
             cv2.LINE_AA,
         )
 
-        out_path = OUT_DIR / f"viz_{idx}_{img_path.stem}.jpg"
+        out_path = out_dir / f"viz_{idx}_{img_path.stem}.jpg"
         cv2.imwrite(str(out_path), img)
-        print(f"Saved: {out_path}")
 
-    print(f"\nAll visualizations saved to:\n{OUT_DIR}")
+    print(f"  Saved visualizations to: {out_dir}")
+
+
+def main() -> None:
+    # Look for model CSVs under MODELS_DIR / "models"
+    models_root = MODELS_DIR / "models"
+    csv_list = []
+    if models_root.exists():
+        csv_list = sorted(models_root.rglob("*.csv"))
+
+    # If none found, fall back to IN_CSV_FALLBACK
+    if not csv_list:
+        if IN_CSV_FALLBACK.exists():
+            csv_list = [IN_CSV_FALLBACK]
+        else:
+            print(f"No model CSVs found in {models_root} and fallback {IN_CSV_FALLBACK} missing.")
+            return
+
+    for csv_path in csv_list:
+        # Skip summary files if they happen to be in the list
+        if "evaluation_summary" in csv_path.name:
+            continue
+
+        try:
+            visualize_model(csv_path)
+        except Exception as e:
+            print(f"Failed to visualize {csv_path}: {e}")
 
 
 if __name__ == "__main__":
