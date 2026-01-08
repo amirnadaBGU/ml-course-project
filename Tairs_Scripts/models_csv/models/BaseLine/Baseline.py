@@ -1,13 +1,10 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# ============================================================
-# PATHS (ROBUST, NO DATA PATHS CHANGED)
-# ============================================================
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # Find project root by folder name (SAFE & PORTABLE)

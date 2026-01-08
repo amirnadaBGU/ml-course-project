@@ -1,5 +1,4 @@
-# language: python
-#!/usr/bin/env python3
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,10 +8,6 @@ from sklearn.neighbors import KNeighborsRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
 
-# ============================================================
-# CONFIG
-# ============================================================
-# Current file: Tairs_Scripts/models_csv/models/KNN/knn.py
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # Navigate up to Project Root
