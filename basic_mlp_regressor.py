@@ -9,8 +9,11 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+from PIL import Image
 import matplotlib
 matplotlib.use('TkAgg')
+import random
+
 
 # --- פונקציית עזר: הכנת דאטה לטסט ---
 def prepare_test_data(input_file, output_file):
@@ -155,7 +158,7 @@ def evaluate_model(model, dataloader):
     print(f"Y-Axis Error: {mae_y:.6f} (norm) -> ~{mae_y * 360:.2f} px")
 
 
-def visualize_single_sample(model, dataset, idx=0):
+def visualize_single_sample_simple(model, dataset, idx=0):
     # 1. שליפת הנתונים
     inputs, target_gt = dataset[idx]
 
@@ -239,10 +242,205 @@ def visualize_single_sample(model, dataset, idx=0):
 
     plt.show()
 
+
+def visualize_single_sample_advanced():
+    # הגדרות נתיבים - עדכן כאן אם צריך
+    BASE_DIR = 'prawn_2025_circ_small_v1'
+    XLSX_PATH = os.path.join(BASE_DIR, 'test_data_all.xlsx')
+    CHECKPOINT_PATH = 'weights/best_model.ckpt'
+
+    print("--- Starting Visualization Process ---")
+
+    # א. טעינת הדאטה הגולמי
+    print(f"1. Loading data from {XLSX_PATH}...")
+    try:
+        df = pd.read_excel(XLSX_PATH, engine='openpyxl')
+    except Exception as e:
+        print(f"Error reading Excel file: {e}")
+        return
+
+    # ב. בחירת סרטן וחילוץ נקודות
+    print("2. Selecting a random prawn...")
+    try:
+        prawn_data = get_random_prawn_data(df)
+    except Exception as e:
+        print(e)
+        return
+
+    print(f"   Selected: Image='{prawn_data['image_stem']}', Object ID={prawn_data['object_id']}")
+
+    pts = prawn_data['points']
+    # הכנת הקלט למודל: [x3, y3, x0, y0, x2, y2]
+    # נקודה 0: חיבור גוף-ראש, נקודה 1: קצה ראש (target), נקודה 2: עין, נקודה 3: גב
+    input_list = [
+        pts[3][0], pts[3][1],  # Point 3
+        pts[0][0], pts[0][1],  # Point 0
+        pts[2][0], pts[2][1]  # Point 2
+    ]
+    input_tensor = torch.tensor(input_list, dtype=torch.float32).unsqueeze(0)  # הוספת מימד Batch
+
+    # ג. טעינת המודל והרצה
+    print(f"3. Loading model from {CHECKPOINT_PATH}...")
+    if not os.path.exists(CHECKPOINT_PATH):
+        print("   Error: Checkpoint not found! Please train the model first.")
+        return
+
+    model = RegressionSystem.load_from_checkpoint(CHECKPOINT_PATH)
+    model.eval()
+    model.to('cpu')  # עבודה על CPU לויזואליזציה
+
+    with torch.no_grad():
+        pred = model(input_tensor).squeeze(0)  # תוצאה: [x1_pred, y1_pred]
+
+    x1_pred, y1_pred = pred[0].item(), pred[1].item()
+    x1_true, y1_true = pts[1][0], pts[1][1]
+
+    print(f"   Prediction: ({x1_pred:.4f}, {y1_pred:.4f})")
+    print(f"   Ground Truth: ({x1_true:.4f}, {y1_true:.4f})")
+
+    # ד. טעינת התמונה
+    print("4. Loading image...")
+    img_path = find_image_path(prawn_data['image_stem'], BASE_DIR)
+
+    if img_path:
+        print(f"   Found image: {img_path}")
+        image = Image.open(img_path)
+        W, H = image.size
+    else:
+        print(f"   Warning: Image not found. Creating a blank white image.")
+        W, H = 640, 360  # רזולוציית ברירת מחדל
+        image = Image.new('RGB', (W, H), color='white')
+
+    # ה. ויזואליזציה
+    print("5. Displaying results...")
+
+    # פונקציית המרה מנורמלי לפיקסלים
+    def to_px(norm_x, norm_y):
+        return norm_x * W, norm_y * H
+
+    # המרת כל הנקודות
+    px0, py0 = to_px(pts[0][0], pts[0][1])
+    px1_gt, py1_gt = to_px(pts[1][0], pts[1][1])
+    px1_pred, py1_pred = to_px(x1_pred, y1_pred)
+    px2, py2 = to_px(pts[2][0], pts[2][1])
+    px3, py3 = to_px(pts[3][0], pts[3][1])
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+
+    # --- צד שמאל: סכמטי ---
+    ax1 = axes[0]
+    ax1.set_title("Schematic View (Normalized Space)")
+    ax1.set_xlim(0, W)
+    ax1.set_ylim(H, 0)  # (0,0) בפינה שמאלית עליונה
+
+    # חיבור קווים (GT): 3 -> 0 -> 1 -> 2
+    ax1.plot([px3, px0, px1_gt, px2], [py3, py0, py1_gt, py2], 'g-', alpha=0.5, label='GT Skeleton')
+    # חיבור קווים (Pred): 0 -> Pred -> 2
+    ax1.plot([px0, px1_pred, px2], [py0, py1_pred, py2], 'r--', alpha=0.5, label='Pred Skeleton')
+
+    # ציור הנקודות
+    ax1.scatter([px3, px0, px2], [py3, py0, py2], c='blue', s=80, label='Input (3,0,2)')
+    ax1.scatter(px1_gt, py1_gt, c='green', s=100, label='Target (1)')
+    ax1.scatter(px1_pred, py1_pred, c='red', marker='X', s=150, label='Prediction')
+    ax1.legend()
+    ax1.grid(True)
+
+    # --- צד ימין: על התמונה ---
+    ax2 = axes[1]
+    ax2.set_title("Overlay on Original Image")
+    ax2.imshow(image)
+
+    # קווים
+    ax2.plot([px3, px0, px1_gt, px2], [py3, py0, py1_gt, py2], 'g-', linewidth=2, alpha=0.7)
+    ax2.plot([px0, px1_pred, px2], [py0, py1_pred, py2], 'r--', linewidth=2, alpha=0.7)
+
+    # נקודות
+    ax2.scatter([px3, px0, px2], [py3, py0, py2], c='blue', s=50, edgecolors='white', zorder=5)
+    ax2.scatter(px1_gt, py1_gt, c='green', s=80, edgecolors='white', zorder=5, label='True Head')
+    ax2.scatter(px1_pred, py1_pred, c='red', marker='X', s=120, edgecolors='white', zorder=6, label='Pred Head')
+
+    # טקסט
+    offset = 10
+    props = dict(boxstyle='round', facecolor='white', alpha=0.5)
+    ax2.text(px3 + offset, py3, "3", fontsize=8, bbox=props)
+    ax2.text(px0 + offset, py0, "0", fontsize=8, bbox=props)
+    ax2.text(px2 + offset, py2, "2", fontsize=8, bbox=props)
+
+    ax2.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
+def find_image_path(image_stem, base_dir):
+    """
+    מחפש את קובץ התמונה בתיקיות train ו-val.
+    """
+    # רשימת התיקיות שבהן נחפש
+    search_dirs = [
+        os.path.join(base_dir, 'images', 'train'),
+        os.path.join(base_dir, 'images', 'val'),
+        # נתיבים נוספים אפשריים אם המבנה שונה:
+        os.path.join(base_dir, 'train', 'images'),
+        os.path.join(base_dir, 'valid', 'images')
+    ]
+
+    # וידוא סיומת
+    filename = image_stem if image_stem.lower().endswith(('.jpg', '.png', '.jpeg')) else f"{image_stem}.jpg"
+
+    for folder in search_dirs:
+        full_path = os.path.join(folder, filename)
+        if os.path.exists(full_path):
+            return full_path
+
+    return None
+
+
+def get_random_prawn_data(df):
+    """
+    בוחר סרטן אקראי מהדאטה, בודק תקינות ומחזיר את הנקודות שלו.
+    """
+    # יצירת מזהה ייחודי לכל סרטן (שם תמונה + מזהה אובייקט)
+    # אנו מניחים שהעמודות הן: image_stem, object_id, keypoint_index, x_norm, y_norm
+    groups = df.groupby(['image_stem', 'object_id'])
+    all_keys = list(groups.groups.keys())
+
+    if not all_keys:
+        raise ValueError("No valid groups found in the dataset.")
+
+    # מנסים למצוא סרטן תקין (עם כל 4 הנקודות)
+    max_attempts = 100
+    for _ in range(max_attempts):
+        random.seed()
+        selected_key = random.choice(all_keys)
+        group = groups.get_group(selected_key)
+
+        # בדיקה: האם יש לנו את כל הנקודות הנדרשות (0, 1, 2, 3)?
+        # אנו צריכים לוודא שקיימות שורות עבור כל אינדקס
+        available_kps = group['keypoint_index'].unique()
+        required_kps = {0, 1, 2, 3}
+
+        if not required_kps.issubset(set(available_kps)):
+            continue  # דלג לסרטן הבא אם חסרה נקודה
+
+        # חילוץ הנקודות למילון נוח
+        points = {}
+        for _, row in group.iterrows():
+            k_idx = int(row['keypoint_index'])
+            points[k_idx] = (row['x_norm'], row['y_norm'])
+
+        return {
+            'image_stem': selected_key[0],
+            'object_id': selected_key[1],
+            'points': points
+        }
+
+    raise RuntimeError("Could not find a valid prawn with all 4 keypoints after multiple attempts.")
+
 # --- Main Logic ---
 if __name__ == "__main__":
 
-    MODE = 'eval_visual'  # train eval or eval_visual
+    MODE = 'eval_visual_advanced'  # train eval or eval_visual_simple or eval_visual_advanced
 
 
     train_file = 'final_train_data.xlsx'
@@ -318,11 +516,9 @@ if __name__ == "__main__":
             # הרצת ההערכה
             evaluate_model(best_model, data_module.val_dataloader())
 
-    elif MODE == 'eval_visual':
+    elif MODE == 'eval_visual_simple':
 
         print("--- Starting Visual Evaluation Mode ---")
-
-        import random
 
         if not os.path.exists(checkpoint_path):
             print(f"Error: Model not found at {checkpoint_path}")
@@ -357,4 +553,10 @@ if __name__ == "__main__":
 
         print(f"Visualizing random sample index: {rand_idx}")
 
-        visualize_single_sample(model, test_dataset, idx=rand_idx)
+        visualize_single_sample_simple(model, test_dataset, idx=rand_idx)
+
+    elif MODE == 'eval_visual_advanced':
+
+        print("--- Starting Advanced Visual Evaluation Mode ---")
+
+        visualize_single_sample_advanced()
