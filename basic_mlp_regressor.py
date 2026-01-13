@@ -60,6 +60,11 @@ class PrawnDataset(Dataset):
 
 
 # --- 2. DataModule ---
+import pytorch_lightning as pl
+from torch.utils.data import DataLoader, random_split
+import torch
+
+
 class PrawnDataModule(pl.LightningDataModule):
     def __init__(self, train_file, test_file, batch_size=32):
         super().__init__()
@@ -68,11 +73,24 @@ class PrawnDataModule(pl.LightningDataModule):
         self.batch_size = batch_size
 
     def setup(self, stage=None):
-        # נטען את הדאטה-סטים כאן כדי שיהיו זמינים גם ב-Train וגם ב-Eval
+        # שלב ה-Fit (אימון וולידציה)
         if stage == 'fit' or stage is None:
-            self.train_dataset = PrawnDataset(self.train_file)
-            self.test_dataset = PrawnDataset(self.test_file)
+            # 1. טוענים את כל הדאטה של האימון
+            full_train_dataset = PrawnDataset(self.train_file)
 
+            # 2. מחשבים את הגדלים לחלוקה (70/30)
+            train_size = int(0.99 * len(full_train_dataset))
+            val_size = len(full_train_dataset) - train_size
+
+            # 3. מבצעים את החלוקה הרנדומלית
+            # מומלץ להוסיף generator לקבעיות (reproducibility) אם תרצה
+            self.train_dataset, self.val_dataset = random_split(
+                full_train_dataset,
+                [train_size, val_size],
+                generator=torch.Generator().manual_seed(42)
+            )
+
+        # שלב ה-Test (נפרד לחלוטין)
         if stage == 'test' or stage is None:
             self.test_dataset = PrawnDataset(self.test_file)
 
@@ -80,8 +98,12 @@ class PrawnDataModule(pl.LightningDataModule):
         return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
 
     def val_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
+        # כעת הולידציה מגיעה מתוך ה-30% שהפרשנו מה-Train File
+        return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False)
 
+    def test_dataloader(self):
+        # זה הפונקציה החדשה שתשתמש בקובץ ה-Test המקורי
+        return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
 
 # --- 3. System (Model) ---
 class RegressionSystem(pl.LightningModule):
@@ -117,46 +139,110 @@ class RegressionSystem(pl.LightningModule):
     def configure_optimizers(self):
         return optim.Adam(self.parameters(), lr=self.hparams.lr)
 
-
 # --- 4. פונקציית הערכה ---
-def evaluate_model(model, dataloader):
+import torch
+import numpy as np
+from torch import nn
+
+
+def evaluate_model(model, datamodule, stage='test'):
     model.eval()
-    device = torch.device("cpu")
+    device = torch.device("cpu")  # או cuda
     model.to(device)
 
-    all_preds = []
-    all_targets = []
+    # פונקציית עזר פנימית
+    def run_evaluation(dataloader, name):
+        all_preds = []
+        all_targets = []
 
-    with torch.no_grad():
-        for inputs, targets in dataloader:
-            inputs = inputs.to(device)
-            outputs = model(inputs)
-            all_preds.append(outputs.cpu().numpy())
-            all_targets.append(targets.numpy())
+        # משתנה לחישוב הלוס הכולל המצטבר (כפי שהמודל רואה אותו)
+        running_loss = 0.0
+        criterion = nn.MSELoss()
 
-    all_preds = np.concatenate(all_preds)
-    all_targets = np.concatenate(all_targets)
+        with torch.no_grad():
+            for inputs, targets in dataloader:
+                inputs = inputs.to(device)
+                targets = targets.to(device)
 
-    # חישוב הפרשים אבסולוטיים (ללא מיצוע בינתיים)
-    abs_errors = np.abs(all_preds - all_targets)
+                outputs = model(inputs)
 
-    # חישוב MAE לכל ציר בנפרד
-    mae_x = np.mean(abs_errors[:, 0])  # עמודה 0 היא X
-    mae_y = np.mean(abs_errors[:, 1])  # עמודה 1 היא Y
+                loss = criterion(outputs, targets)
+                running_loss += loss.item() * inputs.size(0)
 
-    # חישובים כלליים
-    mse = np.mean((all_preds - all_targets) ** 2)
-    mae_total = np.mean(abs_errors)
+                all_preds.append(outputs.cpu().numpy())
+                all_targets.append(targets.cpu().numpy())
 
-    print(f"\n--- תוצאות הערכה (Evaluation) ---")
-    print(f"Total MSE Loss: {mse:.6f}")
-    print(f"Total MAE:      {mae_total:.6f}")
+        # המרה ל-Numpy Arrays
+        all_preds = np.concatenate(all_preds)
+        all_targets = np.concatenate(all_targets)
 
-    print("-" * 40)
-    # המרה לפיקסלים לפי הרזולוציה המקורית (640x360)
-    print(f"X-Axis Error: {mae_x:.6f} (norm) -> ~{mae_x * 640:.2f} px")
-    print(f"Y-Axis Error: {mae_y:.6f} (norm) -> ~{mae_y * 360:.2f} px")
+        # 1. חישוב הלוס הממוצע הכולל
+        final_loss = running_loss / len(dataloader.dataset)
 
+        # ... (כל הקוד הקודם אותו דבר)
+
+        # 2. חישוב MSE בנפרד לכל ציר
+        mse_per_axis = np.mean((all_preds - all_targets) ** 2, axis=0)
+
+        print(f"[{name}] Total Normalized MSE: {final_loss:.5f}")
+
+        if len(mse_per_axis) >= 2:
+            # === תיקון הטעות כאן ===
+
+            # אפשרות 1: RMSE (הכי אינטואיטיבי - שגיאה ממוצעת בפיקסלים)
+            rmse_x_pixels = np.sqrt(mse_per_axis[0]) * 640
+            rmse_y_pixels = np.sqrt(mse_per_axis[1]) * 360
+
+            # אפשרות 2: MSE בפיקסלים (מספרים ענקיים כי זה פיקסלים בריבוע)
+            mse_x_pixels = mse_per_axis[0] * (640 ** 2)
+            mse_y_pixels = mse_per_axis[1] * (360 ** 2)
+
+            print("-" * 20)
+            print(f"[{name}] Average Error (RMSE) in Pixels:")
+            print(f"   X Axis: {rmse_x_pixels:.2f} px")
+            print(f"   Y Axis: {rmse_y_pixels:.2f} px")
+            print("-" * 20)
+            # אם אתה בכל זאת רוצה MSE בפיקסלים:
+            # print(f"[{name}] MSE in Pixels^2: X={mse_x_pixels:.2f}, Y={mse_y_pixels:.2f}")
+
+        return final_loss, mse_per_axis, all_preds, all_targets
+
+    # --- הלוגיקה הראשית ---
+    results = {}
+
+    if stage == 'fit':
+        print("--- Calculating Train Metrics ---")
+        # הוספנו את train_mse_axis למשתנים החוזרים
+        train_loss, train_mse_axis, train_preds, train_y = run_evaluation(datamodule.train_dataloader(), "Train")
+
+        print("--- Calculating Validation Metrics ---")
+        val_loss, val_mse_axis, val_preds, val_y = run_evaluation(datamodule.val_dataloader(), "Val")
+
+        results['train'] = {
+            'loss': train_loss,
+            'mse_axis': train_mse_axis,  # הוספנו למילון
+            'preds': train_preds,
+            'targets': train_y
+        }
+        results['val'] = {
+            'loss': val_loss,
+            'mse_axis': val_mse_axis,  # הוספנו למילון
+            'preds': val_preds,
+            'targets': val_y
+        }
+
+    else:  # stage == 'test'
+        print("--- Calculating Test Metrics ---")
+        test_loss, test_mse_axis, test_preds, test_y = run_evaluation(datamodule.test_dataloader(), "Test")
+
+        results['test'] = {
+            'loss': test_loss,
+            'mse_axis': test_mse_axis,  # הוספנו למילון
+            'preds': test_preds,
+            'targets': test_y
+        }
+
+    return results
 
 def visualize_single_sample_simple(model, dataset, idx=0):
     # 1. שליפת הנתונים
@@ -440,7 +526,7 @@ def get_random_prawn_data(df):
 # --- Main Logic ---
 if __name__ == "__main__":
 
-    MODE = 'eval_visual_advanced'  # train eval or eval_visual_simple or eval_visual_advanced
+    MODE = 'eval'  # train eval or eval_visual_simple or eval_visual_advanced
 
 
     train_file = 'final_train_data.xlsx'
@@ -471,7 +557,7 @@ if __name__ == "__main__":
         logger = CSVLogger("logs", name="prawn_regression")
 
         trainer = pl.Trainer(
-            max_epochs=50,
+            max_epochs=30,
             callbacks=[checkpoint_callback],
             logger=logger,
             accelerator="auto",
@@ -499,22 +585,88 @@ if __name__ == "__main__":
         plt.show()
 
     elif MODE == 'eval':
+
         print("--- Starting Evaluation Mode ---")
 
         if not os.path.exists(checkpoint_path):
+
             print(f"Error: Could not find model at {checkpoint_path}")
+
             print("Please run in 'train' mode first to create the model.")
+
         else:
+
             print(f"Loading model from: {checkpoint_path}")
 
             # טעינת המודל מהקובץ
+
             best_model = RegressionSystem.load_from_checkpoint(checkpoint_path)
 
-            # הרצת setup כדי לטעון את הנתונים
+            # ---------------------------------------------------------
+
+            # 1. הערכה על ה-TEST SET (הקובץ החיצוני הנפרד)
+
+            # ---------------------------------------------------------
+
+            print("\n=== Evaluating on TEST Set ===")
+
             data_module.setup(stage='test')
 
-            # הרצת ההערכה
-            evaluate_model(best_model, data_module.val_dataloader())
+            test_results = evaluate_model(best_model, data_module, stage='test')
+
+            # ---------------------------------------------------------
+
+            # 2. הערכה על ה-TRAIN ו-VALIDATION (הפיצול של 70/30)
+
+            # ---------------------------------------------------------
+
+            print("\n=== Evaluating on TRAIN & VAL Sets ===")
+
+            data_module.setup(stage='fit')
+
+            fit_results = evaluate_model(best_model, data_module, stage='fit')
+
+            # ---------------------------------------------------------
+
+            # סיכום כולל (מעודכן עם שגיאה בפיקסלים)
+
+            # ---------------------------------------------------------
+
+            print("\n" + "=" * 50)
+
+            print("FINAL RESULTS SUMMARY (RMSE in Pixels)")
+
+            print("=" * 50)
+
+
+            # פונקציית עזר קטנה להדפסה יפה
+
+            def print_metric(name, metrics):
+
+                loss = metrics['loss']
+
+                # שליפת ה-MSE לכל ציר
+
+                mse_x = metrics['mse_axis'][0]
+
+                mse_y = metrics['mse_axis'][1]
+
+                # המרה ל-RMSE בפיקסלים (שורש * רזולוציה)
+
+                rmse_x = np.sqrt(mse_x) * 640
+
+                rmse_y = np.sqrt(mse_y) * 360
+
+                print(f"{name:<10} | Loss: {loss:.5f} | Error X: {rmse_x:.2f} px | Error Y: {rmse_y:.2f} px")
+
+
+            print_metric("Train", fit_results['train'])
+
+            print_metric("Val", fit_results['val'])
+
+            print_metric("Test", test_results['test'])
+
+            print("=" * 50)
 
     elif MODE == 'eval_visual_simple':
 
