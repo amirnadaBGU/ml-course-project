@@ -244,6 +244,7 @@ def evaluate_model(model, datamodule, stage='test'):
 
     return results
 
+
 def visualize_single_sample_simple(model, dataset, idx=0):
     # 1. שליפת הנתונים
     inputs, target_gt = dataset[idx]
