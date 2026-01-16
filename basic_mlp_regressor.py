@@ -15,7 +15,7 @@ matplotlib.use('TkAgg')
 from PIL import Image
 import random
 import numpy as np
-
+import itertools
 
 
 # --- 1. Dataset ---
@@ -72,18 +72,38 @@ class PrawnDataModule(pl.LightningDataModule):
         # זה הפונקציה החדשה שתשתמש בקובץ ה-Test המקורי
         return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
 
-# --- 3. System (Model) ---
+
+
 class RegressionSystem(pl.LightningModule):
-    def __init__(self, lr=0.001):
+    def __init__(self, lr=1e-3, hidden_size=128, num_layers=2, optimizer_name='adam'):
         super().__init__()
+        # שמירת כל ההיפר-פרמטרים
         self.save_hyperparameters()
-        self.model = nn.Sequential(
-            nn.Linear(6, 32),
-            nn.ReLU(),
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, 2)
-        )
+
+        layers = []
+        input_dim = 6  # גודל הקלט שלך
+        current_dim = input_dim
+        current_hidden = self.hparams.hidden_size
+
+        # --- בניית השכבות הנסתרות באופן דינמי ---
+        for i in range(self.hparams.num_layers):
+            # הוספת שכבה לינארית: מהגודל הנוכחי לגודל הבא (שהוא חצי מקודמו בשכבות הבאות)
+            layers.append(nn.Linear(current_dim, current_hidden))
+            layers.append(nn.ReLU())  # פונקציית אקטיבציה
+
+            # עדכון הממדים לאיטרציה הבאה
+            current_dim = current_hidden
+            # החלוקה ב-2 עבור השכבה הבאה (כפי שביקשת)
+            # משתמשים ב-max(..., 2) כדי למנוע מצב של 0 נוירונים אם מעמיקים מדי
+            current_hidden = max(current_hidden // 2, 2)
+
+        # --- שכבת הפלט ---
+        # מהשכבה הנסתרת האחרונה לגודל הפלט (2)
+        layers.append(nn.Linear(current_dim, 2))
+
+        # אריזת כל השכבות למודל אחד
+        self.model = nn.Sequential(*layers)
+
         self.criterion = nn.MSELoss()
 
     def forward(self, x):
@@ -104,7 +124,12 @@ class RegressionSystem(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        return optim.Adam(self.parameters(), lr=self.hparams.lr)
+        # בחירה דינמית בין Adam ל-AdamW
+        opt_name = self.hparams.optimizer_name.lower()
+        if opt_name == 'adamw':
+            return torch.optim.AdamW(self.parameters(), lr=self.hparams.lr)
+        else:
+            return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
 
 
 def evaluate_model(model, datamodule, stage='test'):
@@ -448,12 +473,93 @@ def get_random_prawn_data(df):
 
     raise RuntimeError("Could not find a valid prawn with all 4 keypoints after multiple attempts.")
 
-def do_grid_seach():
-    pass
+
+def do_grid_search(train_file, test_file):
+    print("--- Starting Deep Grid Search (Layers, Hidden Size, Optimizers) ---")
+
+    # 1. הגדרת מרחב החיפוש המורחב
+    search_space = {
+        'learning_rate': [1e-3, 5e-3],
+        'batch_size': [32, 64],
+        'hidden_size': [64, 128, 256],      # רוחב השכבה הראשונה
+        'num_layers': [1, 2, 3],            # עומק הרשת (כמה חילוקים לבצע)
+        'optimizer_name': ['adam', 'adamw']
+    }
+
+    best_val_loss = float('inf')
+    best_params = None
+
+    keys, values = zip(*search_space.items())
+    combinations = [dict(zip(keys, v)) for v in itertools.product(*values)]
+
+    print(f"Total combinations to test: {len(combinations)}")
+
+    for i, params in enumerate(combinations):
+        print(f"\n[{i + 1}/{len(combinations)}] Testing: {params}")
+
+        # --- יצירת DataModule ---
+        dm = PrawnDataModule(
+            train_file=train_file,
+            test_file=test_file,
+            batch_size=params['batch_size']
+        )
+
+        # --- יצירת המודל עם הפרמטרים החדשים ---
+        model = RegressionSystem(
+            lr=params['learning_rate'],
+            hidden_size=params['hidden_size'],
+            num_layers=params['num_layers'],    # העברת מספר השכבות
+            optimizer_name=params['optimizer_name']
+        )
+
+        # --- הגדרת Trainer ---
+        checkpoint_callback = ModelCheckpoint(
+            monitor='val_loss',
+            mode='min',
+            save_top_k=1,
+            dirpath='grid_search_checkpoints',
+            filename=f'trial_{i}'
+        )
+
+        trainer = pl.Trainer(
+            max_epochs=10,
+            accelerator="auto",
+            devices=1,
+            logger=False,
+            enable_progress_bar=True,
+            callbacks=[checkpoint_callback],
+        )
+
+        # --- אימון ---
+        trainer.fit(model, datamodule=dm)
+
+        # --- בדיקת תוצאה ---
+        current_val_loss = checkpoint_callback.best_model_score.item()
+        print(f"Result -> Val Loss: {current_val_loss:.5f}")
+
+        if current_val_loss < best_val_loss:
+            best_val_loss = current_val_loss
+            best_params = params
+            print(f"*** New Best Found! ***")
+
+        # ניקוי זיכרון
+        del model
+        del trainer
+        torch.cuda.empty_cache()
+
+    # 3. סיכום
+    print("\n" + "=" * 40)
+    print("GRID SEARCH FINISHED")
+    print("=" * 40)
+    print(f"Best Val Loss: {best_val_loss:.5f}")
+    print(f"Best Params: {best_params}")
+
+    return best_params
 # --- Main Logic ---
+
 if __name__ == "__main__":
 
-    MODE = 'eval'  # train eval or eval_visual_simple or eval_visual_advanced
+    MODE = 'train'  # train eval or eval_visual_simple or eval_visual_advanced
 
 
     train_file = 'final_train_data.xlsx'
@@ -469,7 +575,7 @@ if __name__ == "__main__":
 
     if MODE == 'train':
         print("--- Starting Training Mode ---")
-        model = RegressionSystem()
+        model = RegressionSystem(lr=5e-3, hidden_size=256, num_layers=1, optimizer_name='adam')
 
         # שומר את המודל הכי טוב בשם 'best_model.ckpt' בתיקיית weights
         checkpoint_callback = ModelCheckpoint(
@@ -649,3 +755,6 @@ if __name__ == "__main__":
         print("--- Starting Advanced Visual Evaluation Mode ---")
 
         visualize_single_sample_advanced()
+
+    if MODE == 'grid_search':
+        do_grid_search(train_file, test_file)
