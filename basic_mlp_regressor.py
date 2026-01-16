@@ -555,11 +555,75 @@ def do_grid_search(train_file, test_file):
     print(f"Best Params: {best_params}")
 
     return best_params
-# --- Main Logic ---
+
+
+def plot_error_distribution(all_results,print_list):
+    """
+    מצייר היסטוגרמה של שגיאות המרחק (בפיקסלים) לכל הסטים.
+    """
+    plt.figure(figsize=(12, 6))
+
+    # הגדרות רזולוציה
+    W, H = 640, 360
+
+    # צבעים לכל סט
+    colors = {'train': 'blue', 'val': 'orange', 'test': 'green'}
+
+    found_data = False
+
+    for name in print_list:
+        if name not in all_results:
+            continue
+
+        found_data = True
+        data = all_results[name]
+
+        # שליפת התחזיות והאמת
+        preds = data['preds']
+        targets = data['targets']
+
+        # המרה לפיקסלים (עותק כדי לא לשנות את המקור)
+        p_px = preds.copy()
+        t_px = targets.copy()
+
+        p_px[:, 0] *= W
+        p_px[:, 1] *= H
+        t_px[:, 0] *= W
+        t_px[:, 1] *= H
+
+        # חישוב מרחק לכל נקודה בנפרד (לא ממוצע!)
+        diff = p_px - t_px
+        errors = np.linalg.norm(diff, axis=1)  # וקטור של שגיאות בגודל N
+
+        # חישוב מדדים ללגנד
+        mean_err = np.mean(errors)
+        max_err = np.max(errors)
+
+        # ציור ההיסטוגרמה
+        # alpha=0.5 נותן שקיפות כדי שנוכל לראות חפיפות
+        # bins=50 מחלק את הטווח ל-50 עמודות
+        plt.hist(errors, bins=50, alpha=0.5, label=f"{name.upper()}: Mean={mean_err:.1f}px, Max={max_err:.1f}px",
+                 color=colors.get(name, 'gray'))
+
+    if not found_data:
+        print("No data to plot.")
+        return
+
+    plt.title("Error Distribution (Euclidean Distance in Pixels)")
+    plt.xlabel("Error (Pixels)")
+    plt.ylabel("Count (Number of Samples)")
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.3)
+
+    # אופציונלי: שמירת הגרף לקובץ
+    plt.savefig('error_histogram.png')
+    print("Histogram saved to 'error_histogram.png'")
+
+    plt.show()
 
 if __name__ == "__main__":
 
-    MODE = 'train'  # train eval or eval_visual_simple or eval_visual_advanced
+    MODE = 'eval'  # train eval or eval_visual_simple or eval_visual_advanced
 
 
     train_file = 'final_train_data.xlsx'
@@ -710,6 +774,10 @@ if __name__ == "__main__":
                     print(f"{name.upper():<10} | {loss:.5f}      | {err_x:.2f}         | {err_y:.2f}")
 
             print("=" * 65)
+
+            # === כאן מוסיפים את הציור ===
+            print("Creating Error Histogram...")
+            plot_error_distribution(all_results,['test'])
 
     elif MODE == 'eval_visual_simple':
 
