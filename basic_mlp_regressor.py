@@ -73,7 +73,6 @@ class PrawnDataModule(pl.LightningDataModule):
         return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
 
 
-
 class RegressionSystem(pl.LightningModule):
     def __init__(self, lr=1e-3, hidden_size=128, num_layers=2, optimizer_name='adam'):
         super().__init__()
@@ -621,9 +620,386 @@ def plot_error_distribution(all_results,print_list):
 
     plt.show()
 
+
+def get_prawn_data_from_row(row):
+    """
+    פונקציית עזר שממירה שורה מהאקסל למבנה הנתונים שהויזואליזציה מצפה לו
+    """
+    # המרה ל-str ליתר ביטחון, למקרה שזה מספר
+    stem = str(row['image_stem']) if 'image_stem' in row else str(row.name)
+
+    points = {
+        0: (row['x0'], row['y0']),
+        1: (row['x1_target'], row['y1_target']),  # שים לב: בקובץ המעובד זה x1_target
+        2: (row['x2'], row['y2']),
+        3: (row['x3'], row['y3'])
+    }
+    return {
+        'image_stem': stem,
+        'object_id': row['object_id'] if 'object_id' in row else row.name,
+        'points': points
+    }
+
+
+def find_and_visualize_worst_samples(n_worst=5):
+    # === תיקון הסתירה: שימוש בקובץ המעובד ולא במקורי ===
+    # אנחנו מניחים שהקובץ המעובד נמצא באותה תיקייה שבה רץ הסקריפט
+    PROCESSED_TEST_PATH = 'final_test_data.xlsx'
+    CHECKPOINT_PATH = 'weights/best_model.ckpt'
+    BASE_DIR = 'prawn_2025_circ_small_v1'  # נתיב לתמונות
+
+    print("--- 1. Loading Data & Model ---")
+
+    if not os.path.exists(PROCESSED_TEST_PATH):
+        print(f"Error: {PROCESSED_TEST_PATH} not found. Run in 'train' mode first to generate it.")
+        return
+
+    # טעינת נתונים מהקובץ המעובד (שיש בו x0, y0 וכו')
+    df = pd.read_excel(PROCESSED_TEST_PATH, engine='openpyxl')
+
+    # טעינת מודל
+    if not os.path.exists(CHECKPOINT_PATH):
+        print("Error: Checkpoint not found.")
+        return
+
+    model = RegressionSystem.load_from_checkpoint(CHECKPOINT_PATH)
+    model.eval()
+    model.to('cpu')  # וודא שהמודל על CPU
+
+    errors = []
+
+    print(f"--- 2. Scanning {len(df)} samples for errors ---")
+
+    # קבועי רזולוציה לחישוב פיקסלים
+    W, H = 640, 360
+
+    for idx, row in df.iterrows():
+        # חילוץ נתונים
+        # הערה: get_prawn_data_from_row הותאמה לקרוא x1_target
+        pts = get_prawn_data_from_row(row)['points']
+
+        # הכנת קלט: [x3, y3, x0, y0, x2, y2]
+        input_list = [
+            pts[3][0], pts[3][1],
+            pts[0][0], pts[0][1],
+            pts[2][0], pts[2][1]
+        ]
+        input_tensor = torch.tensor(input_list, dtype=torch.float32).unsqueeze(0)
+
+        with torch.no_grad():
+            pred = model(input_tensor).squeeze(0)
+
+        # המרה לפיקסלים לצורך חישוב השגיאה האמיתית
+        px_pred_x = pred[0].item() * W
+        px_pred_y = pred[1].item() * H
+
+        px_true_x = pts[1][0] * W
+        px_true_y = pts[1][1] * H
+
+        # חישוב מרחק אוקלידי בפיקסלים
+        distance_px = np.sqrt((px_pred_x - px_true_x) ** 2 + (px_pred_y - px_true_y) ** 2)
+
+        errors.append({
+            'error': distance_px,  # שומרים את השגיאה בפיקסלים
+            'row_data': row,
+            'prediction': (pred[0].item(), pred[1].item())  # שומרים מנורמל לציור
+        })
+
+    # מיון לפי השגיאה מהגדול לקטן
+    errors.sort(key=lambda x: x['error'], reverse=True)
+
+    print(f"--- 3. Visualizing Top {n_worst} Worst Predictions ---")
+
+    for i in range(min(n_worst, len(errors))):
+        item = errors[i]
+        print(f"\n#{i + 1} Worst Error: {item['error']:.2f} px")
+        visualize_specific_sample(item, BASE_DIR)
+
+
+def visualize_specific_sample(error_item, base_dir):
+    row = error_item['row_data']
+    prawn_data = get_prawn_data_from_row(row)
+    pts = prawn_data['points']
+
+    # חיזוי (מנורמל)
+    x1_pred_norm, y1_pred_norm = error_item['prediction']
+
+    # טעינת התמונה
+    img_path = find_image_path(prawn_data['image_stem'], base_dir)
+    if img_path and os.path.exists(img_path):
+        image = Image.open(img_path)
+        W, H = image.size
+    else:
+        print(f"   [WARN] Image missing. Using blank.")
+        W, H = 640, 360
+        image = Image.new('RGB', (W, H), color='white')
+
+    # פונקציית המרה לפיקסלים
+    def to_px(norm_x, norm_y):
+        return norm_x * W, norm_y * H
+
+    # המרת כל הנקודות לפיקסלים
+    px0, py0 = to_px(pts[0][0], pts[0][1])
+    px1_gt, py1_gt = to_px(pts[1][0], pts[1][1])
+    px1_pred, py1_pred = to_px(x1_pred_norm, y1_pred_norm)
+    px2, py2 = to_px(pts[2][0], pts[2][1])
+    px3, py3 = to_px(pts[3][0], pts[3][1])
+
+    # --- חישוב גבולות לחיתוך (Zoom) ---
+    all_x = [px0, px1_gt, px1_pred, px2, px3]
+    all_y = [py0, py1_gt, py1_pred, py2, py3]
+
+    min_x, max_x = min(all_x), max(all_x)
+    min_y, max_y = min(all_y), max(all_y)
+
+    padding = 60  # קצת מרווח מסביב
+    crop_x1 = max(0, min_x - padding)
+    crop_y1 = max(0, min_y - padding)
+    crop_x2 = min(W, max_x + padding)
+    crop_y2 = min(H, max_y + padding)
+
+    # --- ציור ---
+    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+    fig.suptitle(f"ID: {prawn_data['object_id']} | Error: {error_item['error']:.2f} px", fontsize=16)
+
+    # פונקציית עזר פנימית לציור האלמנטים (כדי לא לשכפל קוד לשני הצדדים)
+    def draw_elements(ax):
+        # קווים
+        ax.plot([px3, px0, px1_gt, px2], [py3, py0, py1_gt, py2], 'g-', linewidth=3, alpha=0.6, label='GT Skeleton')
+        ax.plot([px0, px1_pred, px2], [py0, py1_pred, py2], 'r--', linewidth=2, alpha=0.8, label='Pred Skeleton')
+
+        # נקודות
+        ax.scatter(px1_gt, py1_gt, c='green', s=120, edgecolors='white', zorder=5, label='Target (GT)')
+        ax.scatter(px1_pred, py1_pred, c='red', marker='X', s=150, edgecolors='white', zorder=6, label='Prediction')
+
+        # טקסט לנקודות העוגן
+        props = dict(boxstyle='circle', facecolor='blue', alpha=0.3)
+        ax.text(px0, py0, "0", color='black', fontsize=9, fontweight='bold', bbox=props)
+        ax.text(px2, py2, "2", color='black', fontsize=9, fontweight='bold', bbox=props)
+        ax.text(px3, py3, "3", color='black', fontsize=9, fontweight='bold', bbox=props)
+
+        # הגדרת הזום (אותו זום לשני הצדדים)
+        ax.set_xlim(crop_x1, crop_x2)
+        ax.set_ylim(crop_y2, crop_y1)  # היפוך ציר Y (0 למעלה)
+
+    # --- צד שמאל: תמונה אמיתית (זום) ---
+    ax_img = axes[0]
+    ax_img.set_title("Real Image (Cropped)")
+    ax_img.imshow(image)
+    draw_elements(ax_img)
+    ax_img.legend(loc='upper right', fontsize='small')
+
+    # --- צד ימין: סכמטי (זום) ---
+    ax_sch = axes[1]
+    ax_sch.set_title("Schematic / Pixel View (Cropped)")
+    ax_sch.grid(True, linestyle='--', alpha=0.5)
+    ax_sch.set_facecolor('#f8f9fa')  # צבע רקע אפרפר בהיר מאוד
+    ax_sch.set_aspect('equal')  # לשמור על פרופורציות
+    draw_elements(ax_sch)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def find_image_path(stem, base_dir):
+    """
+    מחפש את התמונה בתיקיות משנה נפוצות.
+    """
+    stem_str = str(stem)  # המרה למחרוזת למקרה שזה int
+    filename = f"{stem_str}.jpg"  # הנחה שהסיומת היא jpg
+
+    # רשימת מקומות לחפש בהם
+    possible_folders = [
+        os.path.join(base_dir, 'images', 'train'),
+        os.path.join(base_dir, 'images', 'val'),
+    ]
+
+    for folder in possible_folders:
+        full_path = os.path.join(folder, filename)
+        if os.path.exists(full_path):
+            return full_path
+
+    return None
+
+
+def regenerate_test_data_with_names():
+    # 1. הגדרות נתיבים - וודא שהם נכונים אצלך!
+    BASE_DIR = 'prawn_2025_circ_small_v1'
+    RAW_INPUT_FILE = os.path.join(BASE_DIR, 'test_data_all.xlsx')  # הקובץ המקורי הגולמי
+    OUTPUT_FILE = 'final_test_data.xlsx'  # הקובץ שאנחנו רוצים לתקן
+
+    print(f"--- Fixing Data File ---")
+    print(f"Reading raw data from: {RAW_INPUT_FILE}")
+
+    if not os.path.exists(RAW_INPUT_FILE):
+        print(f"❌ Error: Could not find raw file at {RAW_INPUT_FILE}")
+        return
+
+    # 2. קריאת הקובץ הגולמי
+    df = pd.read_excel(RAW_INPUT_FILE, engine='openpyxl')
+
+    # 3. המרה לפורמט רחב (Pivot)
+    # שים לב: אנחנו מגדירים את image_stem ו-object_id כאינדקס
+    pivot_df = df.pivot_table(
+        index=['image_stem', 'object_id'],
+        columns='keypoint_index',
+        values=['x_norm', 'y_norm']
+    )
+
+    # 4. בניית הדאטה-פריים החדש
+    final_df = pd.DataFrame()
+
+    # חילוץ הקואורדינטות
+    # (מניחים שהעמודות קיימות, אם חסר משהו זה יפול כאן)
+    final_df['x3'] = pivot_df[('x_norm', 3)]
+    final_df['y3'] = pivot_df[('y_norm', 3)]
+    final_df['x0'] = pivot_df[('x_norm', 0)]
+    final_df['y0'] = pivot_df[('y_norm', 0)]
+    final_df['x2'] = pivot_df[('x_norm', 2)]
+    final_df['y2'] = pivot_df[('y_norm', 2)]
+    final_df['x1_target'] = pivot_df[('x_norm', 1)]
+    final_df['y1_target'] = pivot_df[('y_norm', 1)]
+
+    # === התיקון הקריטי ===
+    # שליפת השמות המקוריים מתוך האינדקס
+    final_df['image_stem'] = pivot_df.index.get_level_values('image_stem')
+    final_df['object_id'] = pivot_df.index.get_level_values('object_id')
+
+    # 5. ניקוי ושמירה
+    final_df = final_df.dropna()
+
+    # מחיקת הקובץ הישן אם קיים כדי למנוע בלבול
+    if os.path.exists(OUTPUT_FILE):
+        os.remove(OUTPUT_FILE)
+
+    final_df.to_excel(OUTPUT_FILE, index=False)
+
+    print(f"✅ Success! Created '{OUTPUT_FILE}' with correct image names.")
+    print(f"   First row example: Name={final_df.iloc[0]['image_stem']}, ID={final_df.iloc[0]['object_id']}")
+
+
+import seaborn as sns  # וודא שהספרייה מותקנת: pip install seaborn
+
+
+def plot_spatial_error_heatmap(n_excluded=10, grid_size=(20, 10)):
+    """
+    יוצר מפת חום המראה באילו אזורים בתמונה השגיאה גבוהה יותר.
+    מסיר את ה-N דגימות הגרועות ביותר כדי לא לעוות את הגרף.
+
+    Args:
+        n_excluded: כמה דגימות קיצון להסיר.
+        grid_size: רזולוציית הרשת (X bins, Y bins).
+    """
+    # הגדרות נתיבים
+    BASE_DIR = 'prawn_2025_circ_small_v1'
+    PROCESSED_TEST_PATH = 'final_test_data.xlsx'
+    CHECKPOINT_PATH = 'weights/best_model.ckpt'
+
+    print("--- Generating Spatial Error Heatmap ---")
+
+    # 1. טעינת נתונים ומודל
+    if not os.path.exists(PROCESSED_TEST_PATH):
+        print("Data file not found.")
+        return
+    df = pd.read_excel(PROCESSED_TEST_PATH, engine='openpyxl')
+
+    model = RegressionSystem.load_from_checkpoint(CHECKPOINT_PATH)
+    model.eval()
+    model.to('cpu')
+
+    # 2. חישוב שגיאות לכל הדאטה
+    results = []
+    W, H = 640, 360  # רזולוציית התמונה
+
+    print(f"Scanning {len(df)} samples...")
+
+    with torch.no_grad():
+        for idx, row in df.iterrows():
+            # הכנת קלט
+            pts = get_prawn_data_from_row(row)['points']
+            input_tensor = torch.tensor([
+                pts[3][0], pts[3][1],
+                pts[0][0], pts[0][1],
+                pts[2][0], pts[2][1]
+            ], dtype=torch.float32).unsqueeze(0)
+
+            # חיזוי
+            pred = model(input_tensor).squeeze(0)
+
+            # המרה לפיקסלים
+            pred_x, pred_y = pred[0].item() * W, pred[1].item() * H
+            gt_x, gt_y = pts[1][0] * W, pts[1][1] * H
+
+            # חישוב שגיאה
+            error = np.sqrt((pred_x - gt_x) ** 2 + (pred_y - gt_y) ** 2)
+
+            results.append({
+                'gt_x': gt_x,
+                'gt_y': gt_y,
+                'error': error
+            })
+
+    # המרה ל-DataFrame זמני לניתוח
+    res_df = pd.DataFrame(results)
+
+    # 3. סינון ה-N הגרועים ביותר
+    print(f"Filtering top {n_excluded} worst samples...")
+    res_df_sorted = res_df.sort_values('error', ascending=False)
+    # לוקחים את כל הנתונים החל מהמקום ה-N והלאה (מסירים את ההתחלה)
+    filtered_df = res_df_sorted.iloc[n_excluded:].copy()
+
+    max_err = filtered_df['error'].max()
+    mean_err = filtered_df['error'].mean()
+    print(f"Stats after filtering: Max Error={max_err:.2f}px, Mean={mean_err:.2f}px")
+
+    # 4. יצירת מפת החום (Binning)
+    # חלוקת התמונה למשבצות
+    x_bins = np.linspace(0, W, grid_size[0] + 1)
+    y_bins = np.linspace(0, H, grid_size[1] + 1)
+
+    # חישוב שגיאה ממוצעת לכל משבצת
+    # הפונקציה מחזירה 3 ערכים, אנחנו צריכים את הראשון (הסטטיסטיקה)
+    from scipy.stats import binned_statistic_2d
+
+    statistic, x_edge, y_edge, binnumber = binned_statistic_2d(
+        filtered_df['gt_x'],
+        filtered_df['gt_y'],
+        filtered_df['error'],
+        statistic='mean',
+        bins=[x_bins, y_bins]
+    )
+
+    # 5. ציור
+    plt.figure(figsize=(12, 7))
+
+    # שימוש ב-Seaborn לציור יפה
+    # statistic.T נדרש כי המטריצה יוצאת הפוכה (X מול Y)
+    # origin='upper' חשוב כי בתמונות (0,0) זה למעלה
+
+    # החלפת NaN באפס או בערך נייטרלי כדי לא לשבור את הגרף (אופציונלי)
+    # statistic = np.nan_to_num(statistic)
+
+    ax = sns.heatmap(statistic.T, cmap='viridis', cbar_kws={'label': 'Mean Error (px)'},
+                     xticklabels=False, yticklabels=False)
+
+    ax.invert_yaxis()  # היפוך ציר Y שיתאים לתמונה
+
+    plt.title(f"Spatial Error Heatmap (Excluding top {n_excluded} outliers)\nGrid: {grid_size[0]}x{grid_size[1]}",
+              fontsize=15)
+    plt.xlabel(f"Image Width (0-{W})")
+    plt.ylabel(f"Image Height (0-{H})")
+
+    # הוספת רשת עדינה
+    plt.grid(True, which='both', color='white', linestyle='--', linewidth=0.5, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+
+
 if __name__ == "__main__":
 
-    MODE = 'eval'  # train eval or eval_visual_simple or eval_visual_advanced
+    MODE = 'eval_visual_advanced'  # train eval or eval_visual_simple or eval_visual_advanced
 
 
     train_file = 'final_train_data.xlsx'
@@ -636,6 +1012,7 @@ if __name__ == "__main__":
 
     # הכנת המודול של הדאטה
     data_module = PrawnDataModule(train_file, test_file)
+
 
     if MODE == 'train':
         print("--- Starting Training Mode ---")
@@ -824,5 +1201,16 @@ if __name__ == "__main__":
 
         visualize_single_sample_advanced()
 
-    if MODE == 'grid_search':
+    elif MODE == 'grid_search':
         do_grid_search(train_file, test_file)
+
+    elif MODE == 'find_worst':
+        print("--- Starting Worst Samples Visualization Mode ---")
+        find_and_visualize_worst_samples(n_worst=10)
+
+    elif MODE == 'generate_file_with_names':
+        print("--- Regenerating Test Data File with Image Names ---")
+        regenerate_test_data_with_names()
+
+    elif MODE == 'heatmap':
+         plot_spatial_error_heatmap(n_excluded=15, grid_size=(32, 18))
