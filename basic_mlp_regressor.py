@@ -1,48 +1,21 @@
-import torch
-import torch.nn as nn
+import os
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+import torch
+from torch import nn
+from torch.utils.data import Dataset, DataLoader, random_split
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
 import pandas as pd
-import numpy as np
+
 import matplotlib.pyplot as plt
-import os
-from PIL import Image
 import matplotlib
 matplotlib.use('TkAgg')
+
+from PIL import Image
 import random
+import numpy as np
 
-
-# --- פונקציית עזר: הכנת דאטה לטסט ---
-def prepare_test_data(input_file, output_file):
-    if os.path.exists(output_file):
-        # אם הקובץ קיים, לא צריך ליצור מחדש
-        return
-
-    print(f"Processing {input_file}...")
-    df = pd.read_excel(input_file, engine='openpyxl')
-
-    pivot_df = df.pivot_table(
-        index=['image_stem', 'object_id'],
-        columns='keypoint_index',
-        values=['x_norm', 'y_norm']
-    )
-
-    final_df = pd.DataFrame()
-    final_df['x3'] = pivot_df[('x_norm', 3)]
-    final_df['y3'] = pivot_df[('y_norm', 3)]
-    final_df['x0'] = pivot_df[('x_norm', 0)]
-    final_df['y0'] = pivot_df[('y_norm', 0)]
-    final_df['x2'] = pivot_df[('x_norm', 2)]
-    final_df['y2'] = pivot_df[('y_norm', 2)]
-    final_df['x1_target'] = pivot_df[('x_norm', 1)]
-    final_df['y1_target'] = pivot_df[('y_norm', 1)]
-
-    final_df = final_df.dropna()
-    final_df.to_excel(output_file, index=False)
-    print(f"Saved processed test data to {output_file}")
 
 
 # --- 1. Dataset ---
@@ -59,12 +32,6 @@ class PrawnDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-# --- 2. DataModule ---
-import pytorch_lightning as pl
-from torch.utils.data import DataLoader, random_split
-import torch
-
-
 class PrawnDataModule(pl.LightningDataModule):
     def __init__(self, train_file, test_file, batch_size=32):
         super().__init__()
@@ -79,7 +46,7 @@ class PrawnDataModule(pl.LightningDataModule):
             full_train_dataset = PrawnDataset(self.train_file)
 
             # 2. מחשבים את הגדלים לחלוקה (70/30)
-            train_size = int(0.30 * len(full_train_dataset))
+            train_size = int(0.70 * len(full_train_dataset))
             val_size = len(full_train_dataset) - train_size
 
             # 3. מבצעים את החלוקה הרנדומלית
@@ -138,11 +105,6 @@ class RegressionSystem(pl.LightningModule):
 
     def configure_optimizers(self):
         return optim.Adam(self.parameters(), lr=self.hparams.lr)
-
-# --- 4. פונקציית הערכה ---
-import torch
-import numpy as np
-from torch import nn
 
 
 def evaluate_model(model, datamodule, stage='test'):
@@ -486,7 +448,8 @@ def get_random_prawn_data(df):
 
     raise RuntimeError("Could not find a valid prawn with all 4 keypoints after multiple attempts.")
 
-
+def do_grid_seach():
+    pass
 # --- Main Logic ---
 if __name__ == "__main__":
 
@@ -521,7 +484,7 @@ if __name__ == "__main__":
         logger = CSVLogger("logs", name="prawn_regression")
 
         trainer = pl.Trainer(
-            max_epochs=30,
+            max_epochs=50,
             callbacks=[checkpoint_callback],
             logger=logger,
             accelerator="auto",
