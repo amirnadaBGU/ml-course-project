@@ -131,6 +131,86 @@ class RegressionSystem(pl.LightningModule):
             return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
 
 
+def evaluate_model_rmse(model, datamodule, stage='test'):
+    model.eval()
+    device = torch.device("cpu")
+    model.to(device)
+
+    # פונקציית עזר פנימית
+    def run_evaluation(dataloader, name):
+        all_preds = []
+        all_targets = []
+        running_loss = 0.0
+        criterion = nn.MSELoss()
+
+        with torch.no_grad():
+            for inputs, targets in dataloader:
+                inputs = inputs.to(device)
+                targets = targets.to(device)
+                outputs = model(inputs)
+
+                # חישוב MSE Loss רגיל
+                loss = criterion(outputs, targets)
+                running_loss += loss.item() * inputs.size(0)
+
+                all_preds.append(outputs.cpu().numpy())
+                all_targets.append(targets.cpu().numpy())
+
+        all_preds = np.concatenate(all_preds)
+        all_targets = np.concatenate(all_targets)
+
+        # Loss סופי (MSE)
+        mse_loss = running_loss / len(dataloader.dataset)
+        # המרת ה-Loss הכללי ל-RMSE
+        rmse_loss = np.sqrt(mse_loss)
+
+        # --- Method 1: Pixel Error Logic ---
+        W, H = 640, 360
+        preds_px = all_preds.copy()
+        targets_px = all_targets.copy()
+
+        preds_px[:, 0] *= W
+        preds_px[:, 1] *= H
+        targets_px[:, 0] *= W
+        targets_px[:, 1] *= H
+
+        diff = preds_px - targets_px
+
+        # === 1. חישוב RMSE לכל ציר ===
+        squared_diff = diff ** 2
+        mean_squared_diff = np.mean(squared_diff, axis=0)
+        axis_rmse = np.sqrt(mean_squared_diff)
+
+        # === 2. חישוב RMSE כולל (מרחק) ישירות מהנתונים ===
+        # שלב א: סכום הריבועים לכל שורה (dx^2 + dy^2 לכל דוגמה)
+        squared_dist_per_sample = np.sum(squared_diff, axis=1)
+
+        # שלב ב: ממוצע על כל הדוגמאות ושורש (שורש של ממוצע המרחקים בריבוע)
+        dist_rmse_direct = np.sqrt(np.mean(squared_dist_per_sample))
+
+        # החזרת מילון נתונים לשימוש חיצוני
+        return {
+            'loss_mse': mse_loss,
+            'loss_rmse': rmse_loss,
+            'rmse_axis_px': axis_rmse,
+            'rmse_dist_px': dist_rmse_direct,  # <--- הערך החדש שנוסף
+            'preds': all_preds,
+            'targets': all_targets
+        }
+
+    results = {}
+    if stage == 'fit':
+        # הרצת Train ו-Val
+        results['train'] = run_evaluation(datamodule.train_dataloader(), "Train")
+        results['val'] = run_evaluation(datamodule.val_dataloader(), "Val")
+
+    else:  # stage == 'test'
+        # הרצת Test
+        results['test'] = run_evaluation(datamodule.test_dataloader(), "Test")
+
+    return results
+
+
 def evaluate_model(model, datamodule, stage='test'):
     model.eval()
     device = torch.device("cpu")
@@ -979,7 +1059,7 @@ def plot_spatial_error_heatmap(n_excluded=10, grid_size=(20, 10)):
     # החלפת NaN באפס או בערך נייטרלי כדי לא לשבור את הגרף (אופציונלי)
     # statistic = np.nan_to_num(statistic)
 
-    ax = sns.heatmap(statistic.T, cmap='viridis', cbar_kws={'label': 'Mean Error (px)'},
+    ax = sns.heatmap(statistic.T, cmap='YlOrRd', cbar_kws={'label': 'Mean Error (px)'},
                      xticklabels=False, yticklabels=False)
 
     ax.invert_yaxis()  # היפוך ציר Y שיתאים לתמונה
@@ -999,7 +1079,7 @@ def plot_spatial_error_heatmap(n_excluded=10, grid_size=(20, 10)):
 
 if __name__ == "__main__":
 
-    MODE = 'eval_visual_advanced'  # train eval or eval_visual_simple or eval_visual_advanced
+    MODE = 'eval_rmse'  # train eval or eval_visual_simple or eval_visual_advanced
 
 
     train_file = 'final_train_data.xlsx'
@@ -1155,6 +1235,106 @@ if __name__ == "__main__":
             # === כאן מוסיפים את הציור ===
             print("Creating Error Histogram...")
             plot_error_distribution(all_results,['test'])
+
+
+    elif MODE == 'eval_rmse':
+
+        print("\n" + "=" * 40)
+
+        print("   STARTING EVALUATION MODE (RMSE)")
+
+        print("=" * 40)
+
+        # 1. בדיקה שהמודל קיים
+
+        if not os.path.exists(checkpoint_path):
+
+            print(f"❌ Error: Model file not found at: {checkpoint_path}")
+
+            print("   Please run in 'train' mode first.")
+
+
+        else:
+
+            # 2. טעינת המודל
+
+            print(f"⬇️ Loading model from: {checkpoint_path}")
+
+            best_model = RegressionSystem.load_from_checkpoint(checkpoint_path)
+
+            # מילון לאיסוף כל התוצאות (Train, Val, Test)
+
+            all_results = {}
+
+            # ---------------------------------------------------------
+
+            # 3. הרצת TEST
+
+            # ---------------------------------------------------------
+
+            print("\n>> Running Evaluation on TEST set...")
+
+            data_module.setup(stage='test')
+
+            test_res = evaluate_model_rmse(best_model, data_module, stage='test')
+
+            if test_res:
+                all_results.update(test_res)
+
+            # ---------------------------------------------------------
+
+            # 4. הרצת TRAIN + VAL
+
+            # ---------------------------------------------------------
+
+            print("\n>> Running Evaluation on TRAIN & VAL sets...")
+
+            data_module.setup(stage='fit')
+
+            fit_res = evaluate_model_rmse(best_model, data_module, stage='fit')
+
+            if fit_res:
+                all_results.update(fit_res)
+
+            # ---------------------------------------------------------
+
+            # 5. הדפסת טבלת סיכום
+
+            # ---------------------------------------------------------
+
+            # הרחבנו את רוחב ההדפסה כדי להכיל את העמודה החדשה
+
+            print("\n" + "=" * 85)
+
+            print("FINAL RESULTS SUMMARY (RMSE in Pixels)")
+
+            print("=" * 85)
+
+            # הוספת עמודת RMSE Dist
+
+            print(f"{'Dataset':<10} | {'Loss (RMSE)':<12} | {'RMSE X (px)':<12} | {'RMSE Y (px)':<12} | {'RMSE Dist':<12}")
+
+            print("-" * 85)
+
+            # עוברים לפי סדר הגיוני ומדפיסים אם התוצאה קיימת
+
+            for name in ['train', 'val', 'test']:
+
+                if name in all_results:
+                    metrics = all_results[name]
+
+                    loss = metrics['loss_rmse']
+
+                    err_x = metrics['rmse_axis_px'][0]
+
+                    err_y = metrics['rmse_axis_px'][1]
+
+                    # שליפת הנתון החדש שחושב (המרחק הכולל)
+
+                    err_dist = metrics['rmse_dist_px']
+
+                    print(
+                        f"{name.upper():<10} | {loss:.5f}      | {err_x:.2f}         | {err_y:.2f}         | {err_dist:.2f}")
 
     elif MODE == 'eval_visual_simple':
 
