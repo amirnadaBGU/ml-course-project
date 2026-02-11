@@ -46,7 +46,7 @@ class PrawnDataModule(pl.LightningDataModule):
             full_train_dataset = PrawnDataset(self.train_file)
 
             # 2. מחשבים את הגדלים לחלוקה (70/30)
-            train_size = int(0.70 * len(full_train_dataset))
+            train_size = int(0.80 * len(full_train_dataset))
             val_size = len(full_train_dataset) - train_size
 
             # 3. מבצעים את החלוקה הרנדומלית
@@ -1235,7 +1235,6 @@ if __name__ == "__main__":
             # === כאן מוסיפים את הציור ===
             print("Creating Error Histogram...")
             plot_error_distribution(all_results,['test'])
-
 
     elif MODE == 'eval_rmse':
 
