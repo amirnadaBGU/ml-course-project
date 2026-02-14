@@ -251,11 +251,14 @@ def evaluate_model(model, datamodule, stage='test'):
 
         # חישוב MAE לכל ציר (עבור הטבלה הסופית)
         axis_mae = np.mean(np.abs(diff), axis=0)
+        euclidean_distances = np.linalg.norm(diff, axis=1)
+        mean_euclidean_error = np.mean(euclidean_distances)
 
         # החזרת מילון נתונים לשימוש חיצוני
         return {
             'loss': final_loss,
             'mae_axis_px': axis_mae,  # זה המפתח החשוב לטבלה החדשה
+            'mean_euclidean_error': mean_euclidean_error,
             'preds': all_preds,
             'targets': all_targets
         }
@@ -724,7 +727,7 @@ def get_prawn_data_from_row(row):
 def find_and_visualize_worst_samples(n_worst=5):
     # === תיקון הסתירה: שימוש בקובץ המעובד ולא במקורי ===
     # אנחנו מניחים שהקובץ המעובד נמצא באותה תיקייה שבה רץ הסקריפט
-    PROCESSED_TEST_PATH = 'final_test_data.xlsx'
+    PROCESSED_TEST_PATH = 'final_train_data.xlsx'
     CHECKPOINT_PATH = 'weights/best_model.ckpt'
     BASE_DIR = 'prawn_2025_circ_small_v1'  # נתיב לתמונות
 
@@ -1079,7 +1082,7 @@ def plot_spatial_error_heatmap(n_excluded=10, grid_size=(20, 10)):
 
 if __name__ == "__main__":
 
-    MODE = 'eval_rmse'  # train eval or eval_visual_simple or eval_visual_advanced
+    MODE = 'eval'  # train eval or eval_visual_simple or eval_visual_advanced
 
 
     train_file = 'final_train_data.xlsx'
@@ -1209,7 +1212,7 @@ if __name__ == "__main__":
 
             print("=" * 65)
 
-            print(f"{'Dataset':<10} | {'Loss (MSE)':<12} | {'MAE X (px)':<12} | {'MAE Y (px)':<12}")
+            print(f"{'Dataset':<10} | {'Loss (MSE)':<12} | {'MAE X (px)':<12} | {'MAE Y (px)':<12} | {'MAE total (px)':<12}")
 
             print("-" * 65)
 
@@ -1228,7 +1231,9 @@ if __name__ == "__main__":
 
                     err_y = metrics['mae_axis_px'][1]
 
-                    print(f"{name.upper():<10} | {loss:.5f}      | {err_x:.2f}         | {err_y:.2f}")
+                    err = metrics['mean_euclidean_error']
+
+                    print(f"{name.upper():<10} | {loss:.5f}      | {err_x:.2f}         | {err_y:.2f}        | {err:.2f} ")
 
             print("=" * 65)
 
@@ -1385,7 +1390,7 @@ if __name__ == "__main__":
 
     elif MODE == 'find_worst':
         print("--- Starting Worst Samples Visualization Mode ---")
-        find_and_visualize_worst_samples(n_worst=10)
+        find_and_visualize_worst_samples(n_worst=555)
 
     elif MODE == 'generate_file_with_names':
         print("--- Regenerating Test Data File with Image Names ---")
