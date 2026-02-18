@@ -230,13 +230,15 @@ def evaluate_model(model, datamodule, stage='test'):
         diff_norm = all_preds - all_targets
         diff_px = diff_norm * all_lengths
         axis_mae = np.mean(np.abs(diff_px), axis=0)
-
+        dist_px_lengths = np.sqrt(diff_px[:,0]**2 + diff_px[:,1]**2)
+        total_mae = np.mean(dist_px_lengths, axis=0)
         # החזרת מילון נתונים לשימוש חיצוני
         return {
             'loss': final_loss,
-            'mae_axis_px': axis_mae,  # זה המפתח החשוב לטבלה החדשה
+            'mae_axis_px': axis_mae,
             'preds': all_preds,
-            'targets': all_targets
+            'targets': all_targets,
+            'total_mae': total_mae
         }
 
     results = {}
@@ -510,7 +512,6 @@ def get_random_prawn_data(df):
         group = groups.get_group(selected_key)
 
         # בדיקה: האם יש לנו את כל הנקודות הנדרשות (0, 1, 2, 3)?
-        # אנו צריכים לוודא שקיימות שורות עבור כל אינדקס
         available_kps = group['keypoint_index'].unique()
         required_kps = {0, 1, 2, 3}
 
@@ -723,7 +724,7 @@ def find_and_visualize_worst_samples(n_worst=5):
 
     model = RegressionSystem.load_from_checkpoint(CHECKPOINT_PATH)
     model.eval()
-    model.to('cpu')  # וודא שהמודל על CPU
+    model.to('cpu')
 
     errors = []
 
@@ -882,7 +883,6 @@ def find_image_path(stem, base_dir):
 
 
 def regenerate_test_data_with_names():
-    # 1. הגדרות נתיבים - וודא שהם נכונים אצלך!
     BASE_DIR = 'prawn_2025_circ_small_v1'
     RAW_INPUT_FILE = os.path.join(BASE_DIR, 'test_data_all.xlsx')  # הקובץ המקורי הגולמי
     OUTPUT_FILE = 'final_test_data.xlsx'  # הקובץ שאנחנו רוצים לתקן
@@ -919,7 +919,6 @@ def regenerate_test_data_with_names():
     final_df['x1_target'] = pivot_df[('x_norm', 1)]
     final_df['y1_target'] = pivot_df[('y_norm', 1)]
 
-    # === התיקון הקריטי ===
     # שליפת השמות המקוריים מתוך האינדקס
     final_df['image_stem'] = pivot_df.index.get_level_values('image_stem')
     final_df['object_id'] = pivot_df.index.get_level_values('object_id')
@@ -937,7 +936,7 @@ def regenerate_test_data_with_names():
     print(f"   First row example: Name={final_df.iloc[0]['image_stem']}, ID={final_df.iloc[0]['object_id']}")
 
 
-import seaborn as sns  # וודא שהספרייה מותקנת: pip install seaborn
+import seaborn as sns
 
 
 def plot_spatial_error_heatmap(n_excluded=10, grid_size=(20, 10)):
@@ -1033,7 +1032,6 @@ def plot_spatial_error_heatmap(n_excluded=10, grid_size=(20, 10)):
 
     # שימוש ב-Seaborn לציור יפה
     # statistic.T נדרש כי המטריצה יוצאת הפוכה (X מול Y)
-    # origin='upper' חשוב כי בתמונות (0,0) זה למעלה
 
     # החלפת NaN באפס או בערך נייטרלי כדי לא לשבור את הגרף (אופציונלי)
     # statistic = np.nan_to_num(statistic)
@@ -1188,7 +1186,7 @@ if __name__ == "__main__":
 
             print("=" * 65)
 
-            print(f"{'Dataset':<10} | {'Loss (MSE)':<12} | {'MAE X (px)':<12} | {'MAE Y (px)':<12}")
+            print(f"{'Dataset':<10} | {'Loss (MSE)':<12} | {'MAE X (px)':<12} | {'MAE Y (px)':<12} | {'total MAE (px)':<12}")
 
             print("-" * 65)
 
@@ -1207,7 +1205,9 @@ if __name__ == "__main__":
 
                     err_y = metrics['mae_axis_px'][1]
 
-                    print(f"{name.upper():<10} | {loss:.5f}      | {err_x:.2f}         | {err_y:.2f}")
+                    total_mae = metrics['total_mae']
+
+                    print(f"{name.upper():<10} | {loss:.5f}      | {err_x:.2f}         | {err_y:.2f} | {total_mae:.2f}")
 
             print("=" * 65)
 
@@ -1280,7 +1280,6 @@ if __name__ == "__main__":
 
             # ---------------------------------------------------------
 
-            # הרחבנו את רוחב ההדפסה כדי להכיל את העמודה החדשה
 
             print("\n" + "=" * 85)
 

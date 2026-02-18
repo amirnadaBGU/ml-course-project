@@ -207,7 +207,7 @@ def run_interactive_demo():
     BASE_DIR = 'prawn_2025_circ_small_v1'
     EXCEL_PATH = 'final_test_data.xlsx'
     CKPT_EYES = 'weights/best_model_eyes.ckpt'
-    CKPT_CARAPACE = 'weights/best_model_carapce.ckpt'
+    CKPT_CARAPACE = 'weights/best_model_carapace.ckpt'
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 

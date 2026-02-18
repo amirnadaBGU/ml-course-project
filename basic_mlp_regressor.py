@@ -16,7 +16,7 @@ from PIL import Image
 import random
 import numpy as np
 import itertools
-
+import seaborn as sns
 
 # --- 1. Dataset ---
 class PrawnDataset(Dataset):
@@ -57,7 +57,6 @@ class PrawnDataModule(pl.LightningDataModule):
                 generator=torch.Generator().manual_seed(42)
             )
 
-        # שלב ה-Test (נפרד לחלוטין)
         if stage == 'test' or stage is None:
             self.test_dataset = PrawnDataset(self.test_file)
 
@@ -65,11 +64,9 @@ class PrawnDataModule(pl.LightningDataModule):
         return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
 
     def val_dataloader(self):
-        # כעת הולידציה מגיעה מתוך ה-30% שהפרשנו מה-Train File
         return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False)
 
     def test_dataloader(self):
-        # זה הפונקציה החדשה שתשתמש בקובץ ה-Test המקורי
         return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
 
 
@@ -80,7 +77,7 @@ class RegressionSystem(pl.LightningModule):
         self.save_hyperparameters()
 
         layers = []
-        input_dim = 6  # גודל הקלט שלך
+        input_dim = 6  # גודל הקלט
         current_dim = input_dim
         current_hidden = self.hparams.hidden_size
 
@@ -92,7 +89,7 @@ class RegressionSystem(pl.LightningModule):
 
             # עדכון הממדים לאיטרציה הבאה
             current_dim = current_hidden
-            # החלוקה ב-2 עבור השכבה הבאה (כפי שביקשת)
+            # החלוקה ב-2 עבור השכבה הבאה
             # משתמשים ב-max(..., 2) כדי למנוע מצב של 0 נוירונים אם מעמיקים מדי
             current_hidden = max(current_hidden // 2, 2)
 
@@ -193,7 +190,7 @@ def evaluate_model_rmse(model, datamodule, stage='test'):
             'loss_mse': mse_loss,
             'loss_rmse': rmse_loss,
             'rmse_axis_px': axis_rmse,
-            'rmse_dist_px': dist_rmse_direct,  # <--- הערך החדש שנוסף
+            'rmse_dist_px': dist_rmse_direct,
             'preds': all_preds,
             'targets': all_targets
         }
@@ -257,7 +254,7 @@ def evaluate_model(model, datamodule, stage='test'):
         # החזרת מילון נתונים לשימוש חיצוני
         return {
             'loss': final_loss,
-            'mae_axis_px': axis_mae,  # זה המפתח החשוב לטבלה החדשה
+            'mae_axis_px': axis_mae,
             'mean_euclidean_error': mean_euclidean_error,
             'preds': all_preds,
             'targets': all_targets
@@ -321,21 +318,18 @@ def visualize_single_sample_simple(model, dataset, idx=0):
     x_coords_gt = [px3, px0, px1_gt, px2]
     y_coords_gt = [py3, py0, py1_gt, py2]
 
-    # קו כחול/ירוק שמחבר את הנקודות המקוריות
+
     plt.plot(x_coords_gt, y_coords_gt, linestyle='-', color='green', linewidth=2, label='Original Structure (GT)',
              zorder=1)
 
-    # ציור הנקודות הידועות (3, 0, 2)
+
     plt.scatter([px3, px0, px2], [py3, py0, py2], color='blue', s=80, label='Input Points (3,0,2)', zorder=2)
 
-    # ציור נקודת היעד האמיתית (1 GT)
     plt.scatter(px1_gt, py1_gt, color='green', s=100, marker='o', label='True Target (1)', zorder=3)
 
     # --- ציור החיזוי (Prediction) ---
-    # נקודה אדומה גדולה לחיזוי
     plt.scatter(px1_pred, py1_pred, color='red', s=150, marker='X', label='Predicted (1)', zorder=4)
 
-    # אופציונלי: קו מקווקו שמראה איך החיזוי היה נראה (0 -> חיזוי -> 2)
     plt.plot([px0, px1_pred, px2], [py0, py1_pred, py2], linestyle='--', color='red', alpha=0.5,
              label='Predicted Structure')
 
@@ -362,7 +356,6 @@ def visualize_single_sample_simple(model, dataset, idx=0):
 
 
 def visualize_single_sample_advanced():
-    # הגדרות נתיבים - עדכן כאן אם צריך
     BASE_DIR = 'prawn_2025_circ_small_v1'
     XLSX_PATH = os.path.join(BASE_DIR, 'test_data_all.xlsx')
     CHECKPOINT_PATH = 'weights/best_model.ckpt'
@@ -681,9 +674,7 @@ def plot_error_distribution(all_results,print_list):
         mean_err = np.mean(errors)
         max_err = np.max(errors)
 
-        # ציור ההיסטוגרמה
-        # alpha=0.5 נותן שקיפות כדי שנוכל לראות חפיפות
-        # bins=50 מחלק את הטווח ל-50 עמודות
+
         plt.hist(errors, bins=50, alpha=0.5, label=f"{name.upper()}: Mean={mean_err:.1f}px, Max={max_err:.1f}px",
                  color=colors.get(name, 'gray'))
 
@@ -713,7 +704,7 @@ def get_prawn_data_from_row(row):
 
     points = {
         0: (row['x0'], row['y0']),
-        1: (row['x1_target'], row['y1_target']),  # שים לב: בקובץ המעובד זה x1_target
+        1: (row['x1_target'], row['y1_target']),
         2: (row['x2'], row['y2']),
         3: (row['x3'], row['y3'])
     }
@@ -725,8 +716,6 @@ def get_prawn_data_from_row(row):
 
 
 def find_and_visualize_worst_samples(n_worst=5):
-    # === תיקון הסתירה: שימוש בקובץ המעובד ולא במקורי ===
-    # אנחנו מניחים שהקובץ המעובד נמצא באותה תיקייה שבה רץ הסקריפט
     PROCESSED_TEST_PATH = 'final_train_data.xlsx'
     CHECKPOINT_PATH = 'weights/best_model.ckpt'
     BASE_DIR = 'prawn_2025_circ_small_v1'  # נתיב לתמונות
@@ -758,7 +747,6 @@ def find_and_visualize_worst_samples(n_worst=5):
 
     for idx, row in df.iterrows():
         # חילוץ נתונים
-        # הערה: get_prawn_data_from_row הותאמה לקרוא x1_target
         pts = get_prawn_data_from_row(row)['points']
 
         # הכנת קלט: [x3, y3, x0, y0, x2, y2]
@@ -906,7 +894,7 @@ def find_image_path(stem, base_dir):
 
 
 def regenerate_test_data_with_names():
-    # 1. הגדרות נתיבים - וודא שהם נכונים אצלך!
+    # 1. הגדרות נתיבים
     BASE_DIR = 'prawn_2025_circ_small_v1'
     RAW_INPUT_FILE = os.path.join(BASE_DIR, 'test_data_all.xlsx')  # הקובץ המקורי הגולמי
     OUTPUT_FILE = 'final_test_data.xlsx'  # הקובץ שאנחנו רוצים לתקן
@@ -922,7 +910,6 @@ def regenerate_test_data_with_names():
     df = pd.read_excel(RAW_INPUT_FILE, engine='openpyxl')
 
     # 3. המרה לפורמט רחב (Pivot)
-    # שים לב: אנחנו מגדירים את image_stem ו-object_id כאינדקס
     pivot_df = df.pivot_table(
         index=['image_stem', 'object_id'],
         columns='keypoint_index',
@@ -943,7 +930,6 @@ def regenerate_test_data_with_names():
     final_df['x1_target'] = pivot_df[('x_norm', 1)]
     final_df['y1_target'] = pivot_df[('y_norm', 1)]
 
-    # === התיקון הקריטי ===
     # שליפת השמות המקוריים מתוך האינדקס
     final_df['image_stem'] = pivot_df.index.get_level_values('image_stem')
     final_df['object_id'] = pivot_df.index.get_level_values('object_id')
@@ -959,9 +945,6 @@ def regenerate_test_data_with_names():
 
     print(f"✅ Success! Created '{OUTPUT_FILE}' with correct image names.")
     print(f"   First row example: Name={final_df.iloc[0]['image_stem']}, ID={final_df.iloc[0]['object_id']}")
-
-
-import seaborn as sns  # וודא שהספרייה מותקנת: pip install seaborn
 
 
 def plot_spatial_error_heatmap(n_excluded=10, grid_size=(20, 10)):
@@ -1082,13 +1065,13 @@ def plot_spatial_error_heatmap(n_excluded=10, grid_size=(20, 10)):
 
 if __name__ == "__main__":
 
-    MODE = 'eval'  # train eval or eval_visual_simple or eval_visual_advanced
+    MODE = 'eval_rmse'  # train eval or eval_visual_simple or eval_visual_advanced
 
 
     train_file = 'final_train_data.xlsx'
     test_file = 'final_test_data.xlsx'
 
-    # נתיב קבוע למודל (כך נדע איפה לחפש אותו ב-eval)
+    # נתיב קבוע למודל
     checkpoint_path = 'weights/best_model.ckpt'
 
     pl.seed_everything(42)
